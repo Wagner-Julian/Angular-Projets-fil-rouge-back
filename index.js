@@ -7,16 +7,17 @@ const interceptor = require("./middleware/jwt-interceptor");
 
 const app = express();
 
-// Configuration de la base de données
+/*--------------------------------------------------
+  CONNEXION MySQL
+--------------------------------------------------*/
 const connection = mysql.createConnection({
   host: "localhost",
-  port: 3306, //<-- optionnel si c'est le port par défaut (3306)
+  port: 3306,           // 3306 par défaut
   user: "root",
-  //password: "", //<--- ne pas mettre si vous n'avez pas de mot de passe
+  // password: "",
   database: "club_canin",
 });
 
-// Connexion à la base de données
 connection.connect((err) => {
   if (err) {
     console.error("Erreur de connexion à la base de données :", err);
@@ -26,239 +27,268 @@ connection.connect((err) => {
 });
 
 app.use(cors());
+app.use(express.json());
 
-app.use(express.json()); // permet d'envoyer et recevoir du JSON (via les en-tête content-type et accept-content)
-
-app.get("/", (requete, resultat) => {
-  resultat.send("<h1>C'est une API il y a rien a voir ici</h1>");
+/*--------------------------------------------------
+  ROUTES
+--------------------------------------------------*/
+app.get("/", (req, res) => {
+  res.send("<h1>C'est une API, il n'y a rien à voir ici</h1>");
 });
 
-app.get("/utilisateurs/liste", (requete, resultat) => {
-  connection.query("SELECT * FROM utilisateur", (err, lignes) => {
-    //en cas d'erreur sql ou d'interuption de connexion avec la bdd
-    if (err) {
-      console.error(err);
-      return resultat.sendStatus(500);
-    }
-
-    return resultat.json(lignes);
-  });
-});
-
-app.get("/utilisateur/:id", (requete, resultat) => {
+/*-------- LISTE DES COURS --------*/
+app.get("/cours/liste", (req, res) => {
   connection.query(
-    "SELECT * FROM utilisateur WHERE id = ?",
-    [requete.params.id],
-    (err, lignes) => {
-      //en cas d'erreur sql ou d'interuption de connexion avec la bdd
-      if (err) {
-        console.error(err);
-        return resultat.sendStatus(500);
-      }
-
-      //si l'id du utilisateur est inconnu
-      if (lignes.length == 0) {
-        return resultat.sendStatus(404);
-      }
-
-      return resultat.json(lignes[0]);
+    `SELECT c.*, t.nom_type
+      FROM cours c
+      JOIN type t ON c.id_type = t.id_type`,
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      res.json(rows);
     }
   );
 });
 
-app.put("/utilisateur/:id", interceptor, (requete, resultat) => {
-  const utilisateur = requete.body;
-  utilisateur.id = requete.params.id;
-
-  if (requete.user.role != "coach" && requete.user.role != "admin") {
-    return resultat.sendStatus(403);
-  }
-
-  if (
-    utilisateur.nom == null ||
-    utilisateur.nom == "" ||
-    utilisateur.nom.length > 20 ||
-    utilisateur.description.length > 50
-  ) {
-    //validation
-    return resultat.sendStatus(400); //bad request
-  }
-
-  //verification si le nom du utilisateur existe déjà
+/*-------- COURS PAR ID --------*/
+app.get("/cours/:id", (req, res) => {
   connection.query(
-    "SELECT * FROM utilisateur WHERE nom = ? AND id_utilisateur != ?",
-    [utilisateur.nom, utilisateur.id],
-    (err, lignes) => {
-      if (lignes.length > 0) {
-        return resultat.sendStatus(409); //conflict
-      }
+    `SELECT c.id_cours, c.nom_cours AS nom, c.duree_cours, c.date_creation_cours, t.nom_type
+      FROM cours c
+      JOIN type t ON c.id_type = t.id_type
+      WHERE c.id_cours = ?`,
+    [req.params.id],
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      if (rows.length === 0) return res.sendStatus(404);
+      res.json(rows[0]);
+    }
+  );
+});
+
+/*-------- MISE À JOUR D'UN COURS --------*/
+app.put("/cours/:id", interceptor, (req, res) => {
+  const c = req.body;
+  const id_cours = req.params.id;
+  const user = req.user;
+
+  if (!["coach", "admin"].includes(user.role)) return res.sendStatus(403);
+  if (!c.nom || c.nom.trim() === "" || c.nom.length > 20) return res.sendStatus(400);
+  if (c.nom_type && c.nom_type.length > 50) return res.sendStatus(400);
+
+  connection.query(
+    "SELECT 1 FROM cours WHERE nom_cours = ? AND id_cours != ?",
+    [c.nom, id_cours],
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      if (rows.length) return res.sendStatus(409);
 
       connection.query(
-        "UPDATE utilisateur SET nom = ?, prenom = ? WHERE id_utilisateur = ?",
-        [utilisateur.nom, utilisateur.description, utilisateur.id],
-        (err, lignes) => {
-          if (err) {
-            console.error(err);
-            return resultat.sendStatus(500); //internal server error
-          }
+        "INSERT INTO type (nom_type) VALUES (?) ON DUPLICATE KEY UPDATE id_type = LAST_INSERT_ID(id_type)",
+        [c.nom_type],
+        (err2, typeRes) => {
+          if (err2) return res.sendStatus(500);
 
-          return resultat.status(200).json(utilisateur); //ok
+          const id_type = typeRes.insertId || typeRes.lastInsertId;
+
+          connection.query(
+            `UPDATE cours
+            SET nom_cours = ?, duree_cours = ?, id_type = ?
+            WHERE id_cours = ?`,
+            [c.nom, c.duree_cours, id_type, id_cours],
+            (err3, result) => {
+              if (err3) return res.sendStatus(500);
+              if (result.affectedRows === 0) return res.sendStatus(404);
+
+              res.status(200).json({
+                id_cours,
+                nom: c.nom,
+                duree_cours: c.duree_cours,
+                nom_type: c.nom_type,
+              });
+            }
+          );
         }
       );
     }
   );
 });
 
-app.post("/utilisateur", interceptor, (requete, resultat) => {
-  const utilisateur = requete.body;
 
-  if (requete.user.role != "coach" && requete.user.role != "admin") {
-    return resultat.sendStatus(403);
-  }
 
-  if (
-    utilisateur.nom == null ||
-    utilisateur.nom == "" ||
-    utilisateur.nom.length > 20 ||
-    utilisateur.description.length > 50
-  ) {
-    //validation
-    return resultat.sendStatus(400); //bad request
-  }
 
-  //verification si le nom du utilisateur existe déjà
+/*-------- SUPPRESSION D'UN COURS --------*/
+app.delete("/cours/:id", interceptor, (req, res) => {
+  const id = req.params.id;
+  if (!["coach", "admin"].includes(req.user.role)) return res.sendStatus(403);
+
   connection.query(
-    "SELECT * FROM utilisateur WHERE nom = ?",
-    [utilisateur.nom],
-    (err, lignes) => {
-      if (lignes.length > 0) {
-        return resultat.sendStatus(409); //conflict
-      }
+    "DELETE FROM cours WHERE id_cours = ?",
+    [id],
+    (err, result) => {
+      if (err) return res.sendStatus(500);
+      if (result.affectedRows === 0) return res.sendStatus(404);
+      res.sendStatus(204);
+    }
+  );
+});
+
+/*-------- CRÉATION D'UN COURS --------*/
+app.post("/cours", interceptor, (req, res) => {
+  const c = req.body;
+  const user = req.user;
+
+  if (!["coach", "admin"].includes(user.role)) return res.sendStatus(403);
+  if (!c.nom || !c.duree_cours || !c.nom_type) return res.sendStatus(400);
+
+  connection.query(
+    "SELECT 1 FROM cours WHERE nom_cours = ?",
+    [c.nom],
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      if (rows.length) return res.sendStatus(409);
 
       connection.query(
-        "INSERT INTO utilisateur (nom, prenom, id_utilisateur) VALUES (?, ?, ? )",
-        [utilisateur.nom, utilisateur.prenom, requete.user.id ],
-        (err, lignes) => {
-          if (err) {
-            console.error(err);
-            return resultat.sendStatus(500); //internal server error
-          }
+        "INSERT INTO type (nom_type) VALUES (?) ON DUPLICATE KEY UPDATE id_type = LAST_INSERT_ID(id_type)",
+        [c.nom_type],
+        (err2, typeRes) => {
+          if (err2) return res.sendStatus(500);
 
-          resultat.status(201).json(utilisateur); //created
+          const id_type = typeRes.insertId || typeRes.lastInsertId;
+
+          connection.query(
+            `INSERT INTO cours (nom_cours, duree_cours, id_utilisateur, id_type, date_creation_cours)
+              VALUES (?, ?, ?, ?, NOW())`,
+            [c.nom, c.duree_cours, user.id, id_type],
+            (err3, coursRes) => {
+              if (err3) return res.sendStatus(500);
+
+              res.status(201).json({
+                id_cours: coursRes.insertId,
+                nom: c.nom,
+                duree_cours: c.duree_cours,
+                nom_type: c.nom_type,
+              });
+            }
+          );
         }
       );
     }
   );
 });
 
-app.delete("/utilisateur/:id", interceptor, (requete, resultat) => {
-  //on recupere le utilisateur
+/*-------- INSCRIPTION --------*/
+app.post("/inscription", (req, res) => {
+  const u = req.body;
+  const hash = bcrypt.hashSync(u.password, 10);
+
   connection.query(
-    "SELECT * FROM utilisateur WHERE id_utilisateur = ?",
-    [requete.params.id],
-    (erreur, lignes) => {
-      //si il y a eu une erreur
-      if (erreur) {
-        console.error(err);
-        return resultat.sendStatus(500); //internal server error
-      }
+    `INSERT INTO utilisateur
+      (nom, prenom, nom_utilisateur, email, mot_de_passe, id_role, date_inscription)
+    VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+    [u.nom, u.prenom, u.nom_utilisateur, u.email, hash, 3],
+    (err, result) => {
+      if (err && err.code === "ER_DUP_ENTRY") return res.sendStatus(409);
+      if (err) return res.sendStatus(500);
 
-      //si l'id du utilisateur est inconnu
-      if (lignes.length == 0) {
-        return resultat.sendStatus(404);
-      }
+      u.id = result.insertId;
+      res.json(u);
+    }
+  );
+});
 
-      //on vérifie si l'utilisateur connecté est le propriétaire
-      const estProprietaire =
-        requete.user.role == "coach" &&
-        requete.user.id == lignes[0].id_utilisateur;
 
-      //si il n'est ni propriétaire du utilisateur, ni administrateur
-      if (!estProprietaire && requete.user.role != "admin") {
-        return resultat.sendStatus(403);
-      }
+// reservation 
 
-      //on supprime le utilisateur
-      connection.query(
-        "DELETE FROM utilisateur WHERE id_utilisateur = ?",
-        [requete.params.id],
-        (erreur, lignes) => {
-          //si il y a eu une erreur
-          if (erreur) {
-            console.error(err);
-            return resultat.sendStatus(500); //internal server error
+app.post("/reservations", interceptor, (req, res) => {
+  const id_user = req.user.id;
+  const { id_cours } = req.body;
+
+  if (!id_cours) return res.sendStatus(400);
+
+  // Étape 1 – Chercher un chien existant pour cet utilisateur
+  connection.query(
+    "SELECT id_chien FROM chien WHERE id_utilisateur = ? LIMIT 1",
+    [id_user],
+    (err, rows) => {
+      if (err) { console.error("Erreur SELECT chien :", err); return res.sendStatus(500); }
+
+      const ensureReservation = (id_chien) => {
+        console.log("🐶 ID du chien utilisé pour réserver :", id_chien);
+        console.log("📚 ID du cours :", id_cours);
+
+        // Étape 2 – Vérifie si déjà réservé
+        connection.query(
+          "SELECT 1 FROM reservation WHERE id_chien = ? AND id_cours = ?",
+          [id_chien, id_cours],
+          (err2, rows2) => {
+            if (err2) { console.error("Erreur SELECT reservation :", err2); return res.sendStatus(500); }
+            if (rows2.length) {
+              console.warn("⚠️ Ce chien a déjà réservé ce cours !");
+              return res.sendStatus(409); // conflit
+            }
+
+            // Étape 3 – Création de la réservation
+            connection.query(
+              `INSERT INTO reservation (id_chien, id_cours, date_reservation)
+              VALUES (?, ?, NOW())`,
+              [id_chien, id_cours],
+              (err3) => {
+                if (err3) { console.error("Erreur INSERT reservation :", err3); return res.sendStatus(500); }
+                console.log("✅ Réservation créée !");
+                res.sendStatus(201);
+              }
+            );
           }
+        );
+      };
 
-          //204 = no content = tout c'est bien passé, mais il n'y a rien dans le corp de la réponse
-          return resultat.sendStatus(204);
-        }
-      );
+      if (rows.length) {
+        // 👌 Un chien existe → on réserve avec lui
+        ensureReservation(rows[0].id_chien);
+      } else {
+        // ❌ Aucun chien → on en crée un d’abord
+        connection.query(
+          "INSERT INTO chien (id_utilisateur, nom_chien) VALUES (?, 'Mon premier chien')",
+          [id_user],
+          (err4, result) => {
+            if (err4) {
+              console.error("Erreur INSERT chien :", err4);
+              return res.sendStatus(500);
+            }
+            console.log("🐕‍🦺 Chien par défaut créé :", result.insertId);
+            ensureReservation(result.insertId);
+          }
+        );
+      }
     }
   );
 });
 
-app.post("/inscription", (requete, resultat) => {
-  const utilisateur = requete.body;
 
-  const passwordHash = bcrypt.hashSync(utilisateur.password, 10);
 
+
+
+/*-------- CONNEXION --------*/
+app.post("/connexion", (req, res) => {
   connection.query(
-    "INSERT INTO utilisateur(nom, prenom, nom_utilisateur, email, date_inscription, mot_de_passe, id_role) VALUES (?, ?, ?, ? , ?, ?, ?)",
-    [utilisateur.nom, utilisateur.prenom, utilisateur.nom_utilisateur, utilisateur.email, "now()", passwordHash,3],
-    (err, retour) => {
-      if (err && err.code == "ER_DUP_ENTRY") {
-        return resultat.sendStatus(409); //conflict
-      }
-
-      if (err) {
-        console.error(err);
-        return resultat.sendStatus(500); //internal server error
-      }
-
-      utilisateur.id = retour.insertId;
-      resultat.json(utilisateur);
-    }
-  );
-});
-
-app.post("/connexion", (requete, resultat) => {
-  connection.query(
-    `SELECT u.id_utilisateur, u.email, u.mot_de_passe, r.nom_role 
-      FROM utilisateur u 
-      JOIN role r ON u.id_role = r.id_utilisateur 
+    `SELECT u.id_utilisateur, u.email, u.mot_de_passe, r.nom_role
+      FROM utilisateur u
+      JOIN role r ON u.id_role = r.id_role
       WHERE email = ?`,
-    [requete.body.email],
-    (erreur, lignes) => {
-      if (erreur) {
-        console.error(erreur);
-        return resultat.sendStatus(500); //internal server error
-      }
+    [req.body.email],
+    (err, rows) => {
+      if (err) return res.sendStatus(500);
+      if (rows.length === 0) return res.sendStatus(401);
 
-      console.log(lignes);
+      const ok = bcrypt.compareSync(req.body.password, rows[0].mot_de_passe);
+      if (!ok) return res.sendStatus(401);
 
-      //si l'email est inexistant
-      if (lignes.length === 0) {
-        return resultat.sendStatus(401);
-      }
-
-      const motDePasseFormulaire = requete.body.password;
-      const motDePasseHashBaseDeDonnees = lignes[0].password;
-
-      const compatible = bcrypt.compareSync(
-        motDePasseFormulaire,
-        motDePasseHashBaseDeDonnees
-      );
-
-      if (!compatible) {
-        return resultat.sendStatus(401);
-      }
-
-      return resultat.send(
+      res.send(
         jwtUtils.sign(
           {
-            sub: requete.body.email,
-            role: lignes[0].nom,
-            id: lignes[0].id,
+            sub: req.body.email,
+            role: rows[0].nom_role,
+            id: rows[0].id_utilisateur,
           },
           "azerty123"
         )
@@ -267,4 +297,7 @@ app.post("/connexion", (requete, resultat) => {
   );
 });
 
+/*--------------------------------------------------
+  DÉMARRAGE DU SERVEUR
+--------------------------------------------------*/
 app.listen(5000, () => console.log("Le serveur écoute sur le port 5000 !!"));
